@@ -8,7 +8,6 @@ warnings.filterwarnings("ignore")
 
 # loss = nn.CrossEntropyLoss(reduction="none")
 loss_fn = nn.L1Loss(reduction='sum')
-device = myKit.try_gpu()
 
 # criterion = nn.CrossEntropyLoss(reduction='none')
 if __name__ == '__main__':
@@ -17,15 +16,15 @@ if __name__ == '__main__':
     MC = 32
     MF = 64
     beta = 0.95
-    Fine_C = torch.zeros((1, MF*256)).to(device)
-    Coarse_C = torch.zeros((1, MC*512)).to(device)
+    Fine_C = torch.zeros((1, MF*256))
+    Coarse_C = torch.zeros((1, MC*512))
     num_hiddens = 128
     cls_weight = 3
     genderSize = 32
     gender = torch.randint(0, 2, (10, 1), dtype=torch.float)
     net = myKit.get_net(MF=MF, MC=MC, beta=beta, num_hiddens=num_hiddens, genderSize=genderSize)
     lr = 3e-5
-    batch_size = 8
+    batch_size = 64
     num_epochs = 40
     weight_decay = 0
     lr_period = 4
