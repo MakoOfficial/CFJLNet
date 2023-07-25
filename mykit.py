@@ -1,389 +1,323 @@
-import pandas as pd
-from PIL import Image, ImageOps
-import os
-import numpy as np
 import torch
-from torch import Tensor
-from torch.optim.lr_scheduler import StepLR
-from torch.optim.lr_scheduler import ReduceLROnPlateau
-from torchvision import transforms
-import cv2
-from albumentations.augmentations.transforms import Lambda, RandomBrightnessContrast
-from albumentations.augmentations.geometric.transforms import ShiftScaleRotate, HorizontalFlip
-from albumentations.pytorch.transforms import ToTensorV2
-from albumentations.augmentations.crops.transforms import RandomResizedCrop
-from albumentations import Compose
 import torch.nn as nn
+import numpy as np
 import torch.nn.functional as F
-import torch.utils.data as Data
-import torch.utils.data.dataset as Dataset
-import mymodel
-import Animator
-from d2l import torch as d2l
-import csv
-import time
-from sklearn.model_selection import train_test_split
+import torchvision.models
+from torchvision.models import resnet50
 
-"""本文档主要是解决训练过程中的一些所用到的函数的集合
-函数列表：
-获取神经网络：get_net
-标准化数组:standardization
-标准化每个通道:sample_normalize
-训练集的数据增广:training_compose
-"""
+def get_ResNet50():
+    # model = resnet50(pretrained = True)
+    model = resnet50(pretrained=True)
+    output_channels = model.fc.in_features
+    model = list(model.children())[:-2]
+    return model, output_channels
 
-# train_df = pd.read_csv('../data/archive/testDataset/train-dataset.csv')
-# boneage_mean = train_df['boneage'].mean()
-# boneage_div = train_df['boneage'].std()
+class lightWeight(nn.Module):
 
-def get_net(MF, MC, beta, num_hiddens, genderSize):
-    """获取神经网络，attention_size是指注意力机制Q，K矩阵的长度（default=256）， feature_channels为MMAC输出的通道数（default=2048），output_channels为GA模块输出的注意力图通道数（default=1024）
-    isEnsemble是指调用的是整体MMANet（default=TRUE），若值为False，则只调用前半部分的ResNet+MMCA"""
-    MMANet = mymodel.CFJLNet(MF, MC, beta, num_hiddens, genderSize)
-    return MMANet
+    def __init__(self, backbone):
+        super().__init__()
+        self.conv1 = backbone[0]
+        self.BN1 = backbone[1]
+        self.conv2 = backbone[2]
+        self.BN2 = backbone[3]
+        self.conv3 = backbone[4]
+        self.BN3 = backbone[5]
+        self.ReLU = backbone[6]
 
-def sample_normalize(image, **kwargs):
-    """标准化每个通道"""
-    image = image / 255
-    channel = image.shape[2]
-    mean, std = image.reshape((-1, channel)).mean(axis=0), image.reshape((-1, channel)).std(axis=0)
-    return (image - mean) / (std + 1e-3)
-
-
-# 随机删除一个图片上的像素，p为执行概率，scale擦除部分占据图片比例的范围，ratio擦除部分的长宽比范围
-randomErasing = transforms.RandomErasing(scale=(0.02, 0.08), ratio=(0.5, 2), p=0.8)
-
-
-def randomErase(image, **kwargs):
-    """随机删除一个图片上的像素"""
-    return randomErasing(image)
-
-
-transform_train = Compose([
-    # 训练集的数据增广
-    # 随机大小裁剪，512为调整后的图片大小，（0.5,1.0）为scale剪切的占比范围，概率p为0.5
-    # RandomResizedCrop(512, 512, (0.5, 1.0), p=0.5),
-    # ShiftScaleRotate操作：仿射变换，shift为平移，scale为缩放比率，rotate为旋转角度范围，border_mode用于外推法的标记，value即为padding_value，前者用到的，p为概率
-    ShiftScaleRotate(shift_limit=0.2, scale_limit=0.2, rotate_limit=20, border_mode=cv2.BORDER_CONSTANT, value=0.0,
-                     p=0.8),
-    # 水平翻转
-    HorizontalFlip(p=0.5),
-    # 概率调整图片的对比度
-    RandomBrightnessContrast(p=0.8, contrast_limit=(-0.3, 0.2)),
-    # 标准化
-    Lambda(image=sample_normalize),
-    # 将图片转化为tensor类型
-    ToTensorV2()
-    # 做随机擦除
-    # Lambda(image=randomErase)
-])
-
-transform_valid = Compose([
-    # 验证集的数据处理
-    Lambda(image=sample_normalize),
-    ToTensorV2()
-])
-
-
-def read_image(file_path, image_size=448):
-    """读取图片，并统一修改为512x512"""
-    img = Image.open(file_path)
-    # 开始修改尺寸
-    w, h = img.size
-    long = max(w, h)
-    # 按比例缩放成512
-    w, h = int(w / long * image_size), int(h / long * image_size)
-    # 压缩并插值
-    img = img.resize((w, h), Image.ANTIALIAS)
-    # 然后是给短边扩充，使用ImageOps.expand
-    delta_w, delta_h = image_size - w, image_size - h
-    padding = (delta_w // 2, delta_h // 2, delta_w - (delta_w // 2), delta_h - (delta_h // 2))
-    # 转化成np.array
-    return np.array(ImageOps.expand(img, padding).convert("RGB"))
-
-def split_data(data_dir, csv_name, category_num, split_ratio, aug_num):
-    age_df = pd.read_csv(os.path.join(data_dir, csv_name))
-    age_df['path'] = age_df['id'].map(lambda x: os.path.join(data_dir,
-                                                            csv_name.split('.')[0],
-                                                            '{}.png'.format(x)))
-    age_df['exists'] = age_df['path'].map(os.path.exists)
-    print(age_df['exists'].sum(), 'images found of', age_df.shape[0], 'total')
-    age_df['male'] = age_df['male'].astype('float32')
-    age_df['gender'] = age_df['male'].map(lambda x:'male' if x else 'female')
-
-    # age_df['Bin'] = pd.cut(age_df['boneage'], category_num, labels=False)
-    # lower_bound = age_df['Bin'].min() + 5
-    # upper_bound = age_df['Bin'].max() - 5
-    # selected_df = age_df[age_df['Bin'].between(lower_bound, upper_bound)]
-    # global boneage_mean
-    # boneage_mean = selected_df['boneage'].mean()
-    # global boneage_div
-    # boneage_div = selected_df['boneage'].std()
-    # selected_df['zscore'] = selected_df['boneage'].map(lambda x: (x-boneage_mean)/boneage_div)
-    # selected_df.dropna(inplace = True)
-    # selected_df['boneage_category'] = pd.cut(age_df['boneage'], category_num-10)
-
-    global boneage_mean
-    boneage_mean = age_df['boneage'].mean()
-    global boneage_div
-    boneage_div = age_df['boneage'].std()
-    # we don't want normalization for now
-    # boneage_mean = 0
-    # boneage_div = 1.0
-    age_df['zscore'] = age_df['boneage'].map(lambda x: (x-boneage_mean)/boneage_div)
-    age_df.dropna(inplace = True)
-    age_df['boneage_category'] = pd.cut(age_df['boneage'], category_num)
-
-    raw_train_df, valid_df = train_test_split(
-    age_df,
-    test_size=split_ratio,
-    random_state=2023,
-    stratify=age_df['boneage_category']
-    )
-    print('train', raw_train_df.shape[0], 'validation', valid_df.shape[0])
-    # train_df = raw_train_df.groupby(['boneage_category', 'male']).apply(lambda x: x.sample(aug_num, replace=True)).reset_index(drop=True)
-    # 注意的是，这里对df进行多列分组，因为boneage_category为10类， male为2类，所以总共有20类，而apply对每一类进行随机采样，并且有放回的抽取，所以会生成1w的数据
-    # train_df = raw_train_df.groupby(['boneage_category']).apply(lambda x: x)
-    # print('New Data Size:', train_df.shape[0], 'Old Size:', raw_train_df.shape[0])
-    raw_train_df.to_csv("train.csv")
-    valid_df.to_csv("valid.csv")
-    return raw_train_df, valid_df
-    # return train_df, valid_df, boneage_mean, boneage_div
-
-# create 'dataset's subclass,we can read a picture when we need in training trough this way
-class BAATrainDataset(Dataset.Dataset):
-    """重写Dataset类"""
-
-    def __init__(self, df) -> None:
-        self.df = df
-
-    def __getitem__(self, index):
-        row = self.df.iloc[index]
-        num = int(row['id'])
-        # return (transform_train(image=read_iamge(self.file_path, f"{num}.png"))['image'], Tensor([row['male']])), row['boneage']
-        return (transform_train(image=read_image(row["path"]))['image'], Tensor([row['male']])), row[
-            'zscore']
-
-    def __len__(self):
-        return len(self.df)
-
-class BAAValDataset(Dataset.Dataset):
-
-    def __init__(self, df) -> None:
-        self.df = df
-
-
-    def __getitem__(self, index):
-        row = self.df.iloc[index]
-        num = int(row['id'])
-        return (transform_valid(image=read_image(row["path"]))['image'], Tensor([row['male']])), row[
-            'boneage']
-
-    def __len__(self):
-        return len(self.df)
-
-def create_data_loader(train_df, val_df):
-    return BAATrainDataset(train_df), BAAValDataset(val_df)
-
-# criterion = nn.CrossEntropyLoss(reduction='none')
-# penalty function
-# def L1_penalty(net, alpha):
-#     loss = 0
-#     for param in net.MLP.parameters():
-#         loss += torch.sum(torch.abs(param))
-
-#     return alpha * loss
-
-def try_gpu(i=0):
-    """如果存在，则返回gpu(i)，否则返回cpu()"""
-    if torch.cuda.device_count() >= i + 1:
-        return torch.device(f'cuda:{i}')
-    return torch.device('cpu')
-
-def accuracy(y_hat, y):
-    """得出精确数量"""
-    if len(y_hat.shape) > 1 and y_hat.shape[1] > 1:
-        y_hat = d2l.argmax(y_hat, axis=1)
-    cmp = d2l.astype(y_hat, y.dtype) == y
-    return float(d2l.reduce_sum(d2l.astype(cmp, y.dtype)))
+    def forward(self, x, M):
+        input = x
+        feature_map = self.BN1(self.conv1(x))
+        x = feature_map
+        x = self.BN2(self.conv2(x))
+        attention_map = self.ReLU(x)
+        attention_map = attention_map[:, :M, :, :]
+        x = self.BN3(self.conv3(x))
+        x = self.ReLU(input + x)
+        return feature_map, attention_map, x
 
 
 
-def map_fn(net, train_dataset, valid_dataset, num_epochs, lr, wd, lr_period, lr_decay, loss_fn, cls_weight, Fine_C, Coarse_C, batch_size=32, model_path="./model.pth", record_path="./RECORD.csv"):
-    """将训练函数和验证函数杂糅在一起的垃圾函数"""
-    # record outputs of every epoch
-    record = [['epoch', 'training loss', 'val loss', 'lr']]
-    with open(record_path, 'w', newline='') as csvfile:
-        writer = csv.writer(csvfile)
-        for row in record:
-            writer.writerow(row)
-    devices = d2l.try_all_gpus()
-    # 数据读取
-    # Creates dataloaders, which load data in batches
-    # Note: test loader is not shuffled or sampled
-    train_loader = torch.utils.data.DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=6,
-        drop_last=True)
+class FeatureExtract(nn.Module):
 
-    val_loader = torch.utils.data.DataLoader(
-        valid_dataset,
-        batch_size=batch_size,
-        num_workers=6,
-        shuffle=False)
+    def __init__(self, backbone, output_channles, MF, MC):
 
-    # 增加多卡训练
-    net = nn.DataParallel(net, device_ids=devices)
+        super().__init__()
+        self.outChannels = output_channles
+        self.MC = MC
+        self.MF = MF
+        self.LowLayer = nn.Sequential(*backbone[:6]) # (3, H, W) -> (64, H/4, W/4) -> (256, H/4, W/4) ->(512, H/8, W/8)
+        self.MiddleLayer = backbone[6][0] # (1024, H/16, W/16) 去除原BTNK3中的后四层
+        self.lightWeight1 = lightWeight(list(backbone[6][1].children()))
+        self.HighLayer = backbone[7][0] # (2048, H/32, W/32) 去除原BTNK4中的最后一层
+        self.lightWeight2 = lightWeight(list(backbone[7][1].children()))
 
-    ## Network, optimizer, and loss function creation
-    net = net.to(devices[0])
+        self.upsample = nn.Upsample(scale_factor=32, mode='bilinear')
 
-    # loss_fn = nn.MSELoss(reduction = 'sum')
-    # loss_fn = nn.L1Loss(reduction='sum')
+    def forward(self, image):
+        x = self.MiddleLayer(self.LowLayer(image))
+        FF, AF, x = self.lightWeight1(x, self.MF)
+        FC, AC, x = self.lightWeight2(self.HighLayer(x), self.MC)
 
-    optimizer = torch.optim.Adam(net.parameters(), lr=lr, weight_decay=wd)
-    # 每过10轮，学习率降低一半
-    # scheduler = StepLR(optimizer, step_size=lr_period, gamma=lr_decay)
-    scheduler = ReduceLROnPlateau(optimizer, patience=lr_period, factor=lr_decay)
+        # 生成掩码
+        k = np.random.randint(1, self.MC)
+        ACk = AC[:, k, :, :].detach()
+        # ACk = F.interpolate(ACk.unsqueeze(dim=1), scale_factor=32, mode='bilinear')
+        ACk = self.upsample(ACk.unsqueeze(dim=1))
+        sita = np.random.uniform(0.2, 0.5)
+        zero = torch.zeros_like(ACk)
+        one = torch.ones_like(ACk)
+        mask = torch.where(ACk>sita, zero, one)
+        erase_image = image*mask
+        erase_image = erase_image
 
-    seed=101
-    torch.manual_seed(seed)  
+        Ex = self.MiddleLayer(self.LowLayer(erase_image))
+        _, _, Ex = self.lightWeight1(Ex, self.MF)
+        FE, AE, _ = self.lightWeight2(self.HighLayer(Ex), self.MC)
 
-    ## Trains
+        return (FF, AF), (FC, AC), (FE, AE)
 
-    for epoch in range(num_epochs):
-        net.train()
-        print(epoch)
-        this_record = []
-        global training_loss
-        training_loss = torch.tensor([0], dtype=torch.float32)
-        global total_size
-        total_size = torch.tensor([0], dtype=torch.float32)
-        start_time = time.time()
-        # 在不同的设备上运行该模型
-        #   enumerate()，为括号中序列构建索引
-        for batch_idx, data in enumerate(train_loader):
-            # #put data to GPU
-            image, gender = data[0]
-            image, gender = image.type(torch.FloatTensor).to(devices[0]), gender.type(torch.FloatTensor).to(devices[0])
+class A2(nn.Module):
+    def __init__(self, MF, MC):
+        super().__init__()
 
-            batch_size = len(data[1])
-            label = data[1].to(devices[0])
+        self.MC = MC
+        self.MF = MF
+        self.upsample_layer = nn.Upsample(scale_factor=2, mode='bilinear')
+        self.sigmoid = nn.Sigmoid()
 
-            # zero the parameter gradients，是参数梯度归0
-            optimizer.zero_grad()
-            # forward
-            # _, _, _, _, _, _, _, y_pred = net(image, gender)
-            # y_pred = net(image, gender)
-            yF, yC, yEC, Fine_RCloss, Coarse_RCloss, Fine_C, Coarse_C = net(image, gender, Fine_C, Coarse_C, device=devices[0])
-            KL_F = F.kl_div(yF.softmax(dim=-1).log(), label.softmax(dim=-1), reduction='sum')
-            KL_C = F.kl_div(yC.softmax(dim=-1).log(), label.softmax(dim=-1), reduction='sum')
-            KL_EC = F.kl_div(yEC.softmax(dim=-1).log(), label.softmax(dim=-1), reduction='sum')
-            MAE_F = loss_fn(yF, label)
-            MAE_C = loss_fn(yC, label)
-            MAE_EC = loss_fn(yEC, label)
-            loss = ((MAE_F + KL_F) + (MAE_C + KL_C) + (MAE_EC + KL_EC))/cls_weight + Fine_RCloss + Coarse_RCloss
-            # loss = ((MAE_F + KL_F) + (MAE_C + KL_C) + (MAE_EC + KL_EC))/cls_weight
-            # y_pred = y_pred.squeeze()
+    def forward(self, AF, AC):
+        AC = self.upsample_layer(AC)
+        AC = AC.repeat(1, self.MF//self.MC, 1, 1)
+        AC = self.sigmoid(AC)
+        # print(f"AF'shape{AF.shape}, AC'shape {AC.shape}")
+        return AF*AC
+    
+class LSTM(nn.Module):
+    def __init__(self, num_hiddens, M):
+        super().__init__()
+        self.num_hiddens = num_hiddens
+        self.M = M
 
+    def get_lstm_params(self, feature_length, num_hiddens, device):
+        num_inputs = num_outputs = feature_length
 
-            # print(y_pred, label)，求损失
-            # loss = loss_fn(y_pred, label)
-            # loss = criterion(y_pred, label.long()).sum()
-            # backward,calculate gradients，反馈计算梯度
-            # 弃用罚函数
-#             total_loss = loss + L1_penalty(net, 1e-5)
-#             total_loss.backward() 
-            loss.backward()
-            # backward,update parameter，更新参数
-            # 6_3 增大batchsize，若累计8个batch_size更新梯度，或者batch为最后一个batch
-            # if (batch_idx + 1) % 4 == 0 or batch_idx == 377 :
-            #     optimizer.step()
-                # print('Optimizer step seccessful!! This batch idx: ', batch_idx + 1)
-            optimizer.step()
-            batch_loss = loss.item()
+        def normal(shape):
+            return (torch.randn(size=shape, device=device)*0.01)
 
-            training_loss += batch_loss
-            total_size += batch_size
-            print('epoch', epoch+1, '; ', batch_idx+1,' batch loss:', batch_loss / batch_size)
+        def three():
+            return (normal((num_inputs, num_hiddens)),
+                    normal((num_hiddens, num_hiddens)),
+                    torch.zeros(num_hiddens, device=device))
 
-        ## Evaluation
-        # Sets net to eval and no grad context
-        val_total_size, mae_loss = valid_fn(net=net, val_loader=val_loader, devices=devices)
-        # accuracy_num = accuracy(pred_list[1:, :], grand_age[1:])
+        W_xi, W_hi, b_i = three()  # 输入门参数
+        W_xf, W_hf, b_f = three()  # 遗忘门参数
+        W_xo, W_ho, b_o = three()  # 输出门参数
+        W_xc, W_hc, b_c = three()  # 候选记忆元参数
+        # 输出层参数
+        W_hq = normal((num_hiddens, num_outputs))
+        b_q = torch.zeros(num_outputs, device=device)
+        # 附加梯度
+        params = [W_xi, W_hi, b_i, W_xf, W_hf, b_f, W_xo, W_ho, b_o, W_xc, W_hc,
+                b_c, W_hq, b_q]
+        for param in params:
+            param.requires_grad_(True)
+        return params
+
+    def init_lstm_state(self, batch_size, num_hiddens, device):
+        return (torch.zeros((batch_size, num_hiddens), device=device),
+                torch.zeros((batch_size, num_hiddens), device=device))
+    
+    def lstm(self, inputs, state, params):
+        [W_xi, W_hi, b_i, W_xf, W_hf, b_f, W_xo, W_ho, b_o, W_xc, W_hc, b_c,
+        W_hq, b_q] = params
+        (H, C) = state
+        outputs = []
+        for X in inputs:
+            I = torch.sigmoid((X @ W_xi) + (H @ W_hi) + b_i)
+            F = torch.sigmoid((X @ W_xf) + (H @ W_hf) + b_f)
+            O = torch.sigmoid((X @ W_xo) + (H @ W_ho) + b_o)
+            C_tilda = torch.tanh((X @ W_xc) + (H @ W_hc) + b_c)
+            C = F * C + I * C_tilda
+            H = O * torch.tanh(C)
+            Y = (H @ W_hq) + b_q
+            outputs.append(Y)
+        return torch.cat(outputs, dim=0), (H, C)
+
+    def forward(self, input, device):
+        batch_size = input.shape[0]
+        input = input.view(batch_size, self.M, -1)
+        feature_length = input.shape[2]
+        input = input.transpose(0, 1)
+        state = self.init_lstm_state(batch_size, self.num_hiddens, device=device)
+        params = self.get_lstm_params(feature_length, self.num_hiddens, device=device)
+        H, (h, c)=self.lstm(input, state, params)
+        # 返回最后产生的h [batch_size, num_hiddens]
+        return h
         
-        train_loss, val_mae = training_loss / total_size, mae_loss / val_total_size
-        this_record.append([epoch, round(train_loss.item(), 2), round(val_mae.item(), 2), optimizer.param_groups[0]["lr"]])
-        print(
-            f'training loss is {round(train_loss.item(), 2)}, val loss is {round(val_mae.item(), 2)}, time : {round((time.time() - start_time), 2)}, lr:{optimizer.param_groups[0]["lr"]}')
-        scheduler.step()
-        with open(record_path, 'a+', newline='') as csvfile:
-            writer = csv.writer(csvfile)
-            for row in this_record:
-                writer.writerow(row)
-    torch.save(net, model_path)
 
 
-def valid_fn(*, net, val_loader, MF, MC, devices):
-    """验证函数：输入参数：网络，验证数据，验证性别，验证标签
-    输出：返回MAE损失"""
-    net.eval()
-    global val_total_size
-    val_total_size = torch.tensor([0], dtype=torch.float32)
-    global mae_loss
-    mae_loss = torch.tensor([0], dtype=torch.float32)
-    loss_fn = nn.L1Loss(reduction='sum')
-    with torch.no_grad():
-        for batch_idx, data in enumerate(val_loader):
-            val_total_size += len(data[1])
+class DFF(nn.Module):
+    def __init__(self, num_hiddens, M, beta):
+        super().__init__()
+        self.LSTM = LSTM(num_hiddens, M)
+        self.beta = beta
 
-            image, gender = data[0]
-            image, gender = image.type(torch.FloatTensor).to(devices[0]), gender.type(torch.FloatTensor).to(devices[0])
+    def BAP(self, F, A, device):
+        V = torch.zeros((A.shape[0], 1), device=device)
+        for i in range(A.shape[1]):
+            fk = F*torch.unsqueeze(A[:,i,:,:], dim=1)
+            fk = nn.functional.adaptive_avg_pool2d(fk, 1)
+            fk = torch.squeeze(fk) # BxC
+            V = torch.cat((V, fk), dim=1)
+        return V[:, 1:] # BxMC
 
-            label = data[1].type(torch.FloatTensor).to(devices[0])
+    def RCLoss(self, data, C):
+        # M = 32 或 64，C = 256 或 512
+        # data.shape=BxMC, C.shape=1xMC
+        # C 的形状应该和V一致 V.shape = [AC, C]
+        B = data.shape[0]
+        delta = C.repeat(B, 1)
+        MSE = nn.MSELoss()
+        tmp = torch.sum(data-delta, dim=0)
+        C = C + torch.unsqueeze((self.beta*tmp/B), dim=0)
+        delta = C.repeat(B, 1)
+        loss = MSE(data, delta.detach())
+        return loss, C
 
-            #   net内求出的是normalize后的数据，这里应该是是其还原，而不是直接net（）
-            # y_pred = net(image, gender)
-            
-            yF, yC, _, _, _, _, _ = net(image, gender, torch.zeros((1, MF*256)).to(devices[0]), torch.zeros((1, MC*512)).to(devices[0]), device=devices[0])
-            y_pred = (yF + yC)/2
-            y_pred = y_pred.cpu()
-            label = label.cpu()
-            y_pred = y_pred * boneage_div + boneage_mean
-            # y_pred_loss = y_pred.argmax(axis=1)
-            y_pred = y_pred.squeeze()
+    def forward(self, F, A, C, device):
+        V = self.BAP(F, A, device=device)
+        RCloss, C = self.RCLoss(V, C)
+        h_M = self.LSTM(V, device=device)
+        return h_M, RCloss, C
 
-            batch_loss = loss_fn(y_pred, label).item()
-            mae_loss += batch_loss
-    return val_total_size, mae_loss
+class CFJLNet(nn.Module):
+    def __init__(self, MF, MC, beta, num_hiddens, genderSize):
+        super().__init__()
+        self.MC = MC
+        self.MF = MF
+        self.beta = beta
+        self.num_hiddens = num_hiddens
+        self.extrad_feature = FeatureExtract(*get_ResNet50(), self.MF, self.MC)
+        self.A2 = A2(self.MF, self.MC)
+        self.Fine_DFF = DFF(num_hiddens=self.num_hiddens, M=self.MF, beta=self.beta)
+        self.Coarse_DFF = DFF(num_hiddens=self.num_hiddens, M=self.MC, beta=self.beta)
+        self.gender_encoder = nn.Sequential(
+            nn.Linear(1, genderSize),
+            nn.BatchNorm1d(genderSize),
+            nn.ReLU()
+        )
+        self.Fine_MLP = nn.Sequential(
+            nn.Linear(self.num_hiddens + genderSize, 128),
+            nn.BatchNorm1d(128),
+            nn.ReLU(),
+            nn.Linear(128, 1)
+        )
+        self.Coarse_MLP = nn.Sequential(
+            nn.Linear(self.num_hiddens + genderSize, 128),
+            nn.BatchNorm1d(128),
+            nn.ReLU(),
+            nn.Linear(128, 1)
+        )
 
-def loss_map(class_loss, class_num, path):
-    """"输入参数：各个年龄的损失class_loss，各个年龄的数量class_num，画出每个年龄的误差图"""
-    data = torch.zeros((230, 1))
-    for i in range(class_loss.shape[0]):
-        if class_num[i]:
-            data[i] = class_loss[i] / class_num[i]
-    legend = ['MAE']
-    animator = Animator.Animator(xlabel='month', xlim=[1, 230], legend=legend)
-    for i in range(data.shape[0]):
-        animator.add(i, data[i])
-    animator.save(path)
+    def forward(self, image, gender, Fine_C, Coarse_C, device):
+        F_data, C_data, E_data = self.extrad_feature(image)
+        AF_plus = self.A2(F_data[1], C_data[1])
+        gF, Fine_RCloss, Fine_C = self.Fine_DFF(F_data[0], AF_plus, Fine_C, device=device)
+        gC, Coarse_RCloss, Coarse_C = self.Coarse_DFF(*C_data, Coarse_C, device=device)
+        gEC, _, _ = self.Coarse_DFF(*E_data, torch.zeros_like(Coarse_C, dtype=torch.float, device=device), device=device)
+        gender_feature = self.gender_encoder(gender)
+        gF = torch.cat([gF, gender_feature], dim=1)
+        gC = torch.cat([gC, gender_feature], dim=1)
+        gEC = torch.cat([gEC, gender_feature], dim=1)
+        yF = self.Fine_MLP(gF)
+        yC = self.Coarse_MLP(gC)
+        yEC = self.Coarse_MLP(gEC)
+
+        return yF, yC, yEC, Fine_RCloss, Coarse_RCloss, Fine_C, Coarse_C
 
 
+
+
+
+import matplotlib.pyplot as plt
+from matplotlib import cm
 if __name__ == '__main__':
-    # num_epochs, learning_rate, weight_decay = 10, 2e-4, 5e-4
-    # lr_period, lr_decay = 10, 0.5
-    # x = torch.rand((16, 3, 512, 512))
-    # gender = torch.ones((16, 1))
-    # age = torch.ones((16, 1))
-    # MMANet = get_net(isEnsemble=True)
-    # MMANet = MMANet.to(device=try_gpu())
-    # print(sum(p.numel() for p in MMANet.parameters()))
-    # params = list(MMANet.MLP.parameters())
-    # print(params)
-    bone_dir = "F:\GitCode\BoneAgeAss-main\data/archive/testDataset"
-    csv_name = "boneage-traning-dataset.csv"
-    train_df, valid_df = split_data(bone_dir, csv_name, 10, 0.1, 10)
-    print("boneage_mean = ", boneage_mean, "boneage_div", boneage_div)
+    loss_fn = nn.L1Loss(reduction='sum')
+    image = torch.randint(0, 10, (10, 3 ,448, 448), dtype=torch.float).cuda()
+    label = torch.randint(0, 10, (10, 1), dtype=torch.float).cuda()
+    # print(type(image))
+    MC = 32
+    MF = 64
+    beta = 0.95
+    Fine_C = torch.zeros((1, MF*256)).cuda()
+    Coarse_C = torch.zeros((1, MC*512)).cuda()
+    num_hiddens = 128
+    genderSize = 32
+    gender = torch.randint(0, 2, (10, 1), dtype=torch.float).cuda()
+    net = CFJLNet(MF, MC, beta, num_hiddens, genderSize).cuda()
+    total_params = sum(p.numel() for p in net.parameters())
+    # print(total_params)
+    yF, yC, yEC, Fine_RCloss, Coarse_RCloss, Fine_C, Coarse_C = net(image, gender, Fine_C, Coarse_C)
+    # print(f"yF.shape:{yF.shape}, yC.shape:{yC.shape}, yEC.shape:{yEC.shape}\nFine_RCloss = {Fine_RCloss}, Coarse_RCloss = {Coarse_RCloss}\nFine_C.shape:{Fine_C.shape}, Coarse_C.shape:{Coarse_C.shape}")
+    KL_F = F.kl_div(yF.softmax(dim=-1).log(), label.softmax(dim=-1), reduction='sum')
+    KL_C = F.kl_div(yC.softmax(dim=-1).log(), label.softmax(dim=-1), reduction='sum')
+    KL_EC = F.kl_div(yEC.softmax(dim=-1).log(), label.softmax(dim=-1), reduction='sum')
+    MAE_F = loss_fn(yF, label)
+    MAE_C = loss_fn(yC, label)
+    MAE_EC = loss_fn(yEC, label)
+    loss = ((MAE_F + KL_F) + (MAE_C + KL_C) + (MAE_EC + KL_EC))/3 + Fine_RCloss + Coarse_RCloss
+    print(f"loss is {loss}")
+    # FF, AF, FC, AC, ACk, k = net(image)
+    # FF, AF, FC, AC = net(image)
+    # print(f"this is FF's shape: {FF.shape}\nthis is AF's shape: {AF.shape}\nthis is FC's shape: {FC.shape}\nthis is AC's shape:{AC.shape}")
+    # bilinear_upsample = F.interpolate(ACk.view(10, 1, 14, 14), scale_factor=32, mode='bilinear')
+    # bicubic_upsample = F.interpolate(ACk.view(10, 1, 14, 14), scale_factor=32, mode='bicubic')
+    # nearest_upsample = F.interpolate(ACk.view(10, 1, 14, 14), scale_factor=32, mode='nearest')
+    
+    # sita = np.random.uniform(0.2, 0.5)
+    # zero = torch.zeros_like(bicubic_upsample)
+    # one = torch.ones_like(bicubic_upsample)
+    # mask1 = torch.where(bilinear_upsample > sita, zero, one)
+    # mask2 = torch.where(bicubic_upsample > sita, zero, one)
+    # mask3 = torch.where(nearest_upsample > sita, zero, one)
+    # pics_gray = torch.mean(image, dim=1)
+    # erase = torch.mean(erase_pics, dim=1)
+    # bilinear_mask = pics_gray[1]*mask1
+    # bicubic_mask = pics_gray[1]*mask2
+    # nearest_mask = pics_gray[1]*mask3
+    # plt.figure()
+    # plt.subplot(2,4,1)
+    # plt.imshow(pics_gray[1].squeeze().detach().numpy())
+    # plt.subplot(2,4,2)
+    # plt.imshow(bicubic_upsample[1].squeeze().detach().numpy())
+    # plt.subplot(2,4,3)
+    # plt.imshow(bilinear_upsample[1].squeeze().detach().numpy())
+    # plt.subplot(2,4,4)
+    # plt.imshow(nearest_upsample[1].squeeze().detach().numpy())
+    # plt.subplot(2,4,5)
+    # plt.imshow(pics_gray[1].squeeze().detach().numpy())
+    # plt.subplot(2,4,6)
+    # plt.imshow(bicubic_mask[1].squeeze().detach().numpy())
+    # plt.subplot(2,4,7)
+    # plt.imshow(bilinear_mask[1].squeeze().detach().numpy())
+    # plt.subplot(2,4,8)
+    # plt.imshow(nearest_mask[1].squeeze().detach().numpy())
+    # plt.colorbar(cax=None, ax=None, shrink=1)
+    # plt.show()
+
+    # pli_pic = []
+    # for i in range(pics_gray.shape[0]):
+    #     pli_pic.append(pics_gray[i].squeeze())
+    # for i in range(mask.shape[0]):
+    #     pli_pic.append(mask[i].squeeze())
+    # for i in range(erase.shape[0]):
+    #     pli_pic.append(erase[i].squeeze())
+    # fig, axes = plt.subplots(3, image.shape[0], figsize=(image.shape[0] * 2, 3 * 2))
+    # axes = axes.flatten()
+    # for i, (ax, img) in enumerate(zip(axes, pli_pic)):
+    #     if torch.is_tensor(img):
+    #         im = ax.imshow(img.numpy())
+    #     else:
+    #         # PIL Image
+    #         im = ax.imshow(img, cmap='gray')
+    # plt.show()
