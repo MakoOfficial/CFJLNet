@@ -98,16 +98,16 @@ class LSTM(nn.Module):
         self.num_hiddens = num_hiddens
         self.M = M
 
-    def get_lstm_params(self, feature_length, num_hiddens):
+    def get_lstm_params(self, feature_length, num_hiddens, device):
         num_inputs = num_outputs = feature_length
 
         def normal(shape):
-            return (torch.randn(size=shape)*0.01).cuda()
+            return (torch.randn(size=shape, device=device)*0.01)
 
         def three():
-            return (normal((num_inputs, num_hiddens)).cuda(),
-                    normal((num_hiddens, num_hiddens)).cuda(),
-                    torch.zeros(num_hiddens).cuda())
+            return (normal((num_inputs, num_hiddens, device=device)),
+                    normal((num_hiddens, num_hiddens, device=device)),
+                    torch.zeros(num_hiddens, device=device))
 
         W_xi, W_hi, b_i = three()  # 输入门参数
         W_xf, W_hf, b_f = three()  # 遗忘门参数
@@ -115,7 +115,7 @@ class LSTM(nn.Module):
         W_xc, W_hc, b_c = three()  # 候选记忆元参数
         # 输出层参数
         W_hq = normal((num_hiddens, num_outputs))
-        b_q = torch.zeros(num_outputs).cuda()
+        b_q = torch.zeros(num_outputs, device=device)
         # 附加梯度
         params = [W_xi, W_hi, b_i, W_xf, W_hf, b_f, W_xo, W_ho, b_o, W_xc, W_hc,
                 b_c, W_hq, b_q]
@@ -123,9 +123,9 @@ class LSTM(nn.Module):
             param.requires_grad_(True)
         return params
 
-    def init_lstm_state(self, batch_size, num_hiddens):
-        return (torch.zeros((batch_size, num_hiddens)).cuda(),
-                torch.zeros((batch_size, num_hiddens)).cuda())
+    def init_lstm_state(self, batch_size, num_hiddens, device):
+        return (torch.zeros((batch_size, num_hiddens, device=device)),
+                torch.zeros((batch_size, num_hiddens, device=device)))
     
     def lstm(self, inputs, state, params):
         [W_xi, W_hi, b_i, W_xf, W_hf, b_f, W_xo, W_ho, b_o, W_xc, W_hc, b_c,
@@ -143,13 +143,13 @@ class LSTM(nn.Module):
             outputs.append(Y)
         return torch.cat(outputs, dim=0), (H, C)
 
-    def forward(self, input):
+    def forward(self, input, device):
         batch_size = input.shape[0]
         input = input.view(batch_size, self.M, -1)
         feature_length = input.shape[2]
         input = input.transpose(0, 1)
-        state = self.init_lstm_state(batch_size, self.num_hiddens)
-        params = self.get_lstm_params(feature_length, self.num_hiddens)
+        state = self.init_lstm_state(batch_size, self.num_hiddens, device=device)
+        params = self.get_lstm_params(feature_length, self.num_hiddens, device=device)
         H, (h, c)=self.lstm(input, state, params)
         # 返回最后产生的h [batch_size, num_hiddens]
         return h
@@ -162,8 +162,8 @@ class DFF(nn.Module):
         self.LSTM = LSTM(num_hiddens, M)
         self.beta = beta
 
-    def BAP(self, F, A):
-        V = torch.zeros((A.shape[0], 1)).cuda()
+    def BAP(self, F, A, device):
+        V = torch.zeros((A.shape[0], 1), device=device)
         for i in range(A.shape[1]):
             fk = F*torch.unsqueeze(A[:,i,:,:], dim=1)
             fk = nn.functional.adaptive_avg_pool2d(fk, 1)
@@ -184,14 +184,14 @@ class DFF(nn.Module):
         loss = MSE(data, delta.detach())
         return loss, C
 
-    def forward(self, F, A, C):
-        V = self.BAP(F, A)
+    def forward(self, F, A, C, device):
+        V = self.BAP(F, A, device=device)
         RCloss, C = self.RCLoss(V, C)
-        h_M = self.LSTM(V)
+        h_M = self.LSTM(V, device=device)
         return h_M, RCloss, C
 
 class CFJLNet(nn.Module):
-    def __init__(self, MF, MC, beta, num_hiddens, genderSize):
+    def __init__(self, MF, MC, beta, num_hiddens, genderSize, device):
         super().__init__()
         self.MC = MC
         self.MF = MF
@@ -219,12 +219,12 @@ class CFJLNet(nn.Module):
             nn.Linear(128, 1)
         )
 
-    def forward(self, image, gender, Fine_C, Coarse_C):
+    def forward(self, image, gender, Fine_C, Coarse_C, device):
         F_data, C_data, E_data = self.extrad_feature(image)
         AF_plus = self.A2(F_data[1], C_data[1])
-        gF, Fine_RCloss, Fine_C = self.Fine_DFF(F_data[0], AF_plus, Fine_C)
-        gC, Coarse_RCloss, Coarse_C = self.Coarse_DFF(*C_data, Coarse_C)
-        gEC, _, _ = self.Coarse_DFF(*E_data, torch.zeros_like(Coarse_C, dtype=torch.float).cuda())
+        gF, Fine_RCloss, Fine_C = self.Fine_DFF(F_data[0], AF_plus, Fine_C, device=device)
+        gC, Coarse_RCloss, Coarse_C = self.Coarse_DFF(*C_data, Coarse_C, device=device)
+        gEC, _, _ = self.Coarse_DFF(*E_data, torch.zeros_like(Coarse_C, dtype=torch.float, device=device), device=device)
         gender_feature = self.gender_encoder(gender)
         gF = torch.cat([gF, gender_feature], dim=1)
         gC = torch.cat([gC, gender_feature], dim=1)
