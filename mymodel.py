@@ -7,7 +7,7 @@ from torchvision.models import resnet50
 
 def get_ResNet50():
     # model = resnet50(pretrained = True)
-    model = resnet50(weights=torchvision.models.ResNet50_Weights.IMAGENET1K_V1)
+    model = resnet50(pretrained=True)
     output_channels = model.fc.in_features
     model = list(model.children())[:-2]
     return model, output_channels
@@ -105,8 +105,8 @@ class LSTM(nn.Module):
             return (torch.randn(size=shape, device=device)*0.01)
 
         def three():
-            return (normal((num_inputs, num_hiddens, device=device)),
-                    normal((num_hiddens, num_hiddens, device=device)),
+            return (normal((num_inputs, num_hiddens)),
+                    normal((num_hiddens, num_hiddens)),
                     torch.zeros(num_hiddens, device=device))
 
         W_xi, W_hi, b_i = three()  # 输入门参数
@@ -124,8 +124,8 @@ class LSTM(nn.Module):
         return params
 
     def init_lstm_state(self, batch_size, num_hiddens, device):
-        return (torch.zeros((batch_size, num_hiddens, device=device)),
-                torch.zeros((batch_size, num_hiddens, device=device)))
+        return (torch.zeros((batch_size, num_hiddens), device=device),
+                torch.zeros((batch_size, num_hiddens), device=device))
     
     def lstm(self, inputs, state, params):
         [W_xi, W_hi, b_i, W_xf, W_hf, b_f, W_xo, W_ho, b_o, W_xc, W_hc, b_c,
@@ -179,7 +179,7 @@ class DFF(nn.Module):
         delta = C.repeat(B, 1)
         MSE = nn.MSELoss()
         tmp = torch.sum(data-delta, dim=0)
-        C += torch.unsqueeze((self.beta*tmp/B), dim=0)
+        C = C + torch.unsqueeze((self.beta*tmp/B), dim=0)
         delta = C.repeat(B, 1)
         loss = MSE(data, delta.detach())
         return loss, C
@@ -191,7 +191,7 @@ class DFF(nn.Module):
         return h_M, RCloss, C
 
 class CFJLNet(nn.Module):
-    def __init__(self, MF, MC, beta, num_hiddens, genderSize, device):
+    def __init__(self, MF, MC, beta, num_hiddens, genderSize):
         super().__init__()
         self.MC = MC
         self.MF = MF
