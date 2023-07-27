@@ -93,10 +93,13 @@ class A2(nn.Module):
         return AF*AC
     
 class LSTM(nn.Module):
-    def __init__(self, num_hiddens, M):
+    def __init__(self, num_hiddens, M, device, feature_size):
         super().__init__()
         self.num_hiddens = num_hiddens
         self.M = M
+        # 这里batch_size只能设置4
+        self.state = self.init_lstm_state(4, self.num_hiddens, device=device)
+        self.params = self.get_lstm_params(feature_size, self.num_hiddens, device=device)
 
     def get_lstm_params(self, feature_length, num_hiddens, device):
         num_inputs = num_outputs = feature_length
@@ -143,23 +146,20 @@ class LSTM(nn.Module):
             outputs.append(Y)
         return torch.cat(outputs, dim=0), (H, C)
 
-    def forward(self, input, device):
+    def forward(self, input):
         batch_size = input.shape[0]
         input = input.view(batch_size, self.M, -1)
-        feature_length = input.shape[2]
         input = input.transpose(0, 1)
-        state = self.init_lstm_state(batch_size, self.num_hiddens, device=device)
-        params = self.get_lstm_params(feature_length, self.num_hiddens, device=device)
-        H, (h, c)=self.lstm(input, state, params)
+        H, (h, c)=self.lstm(input, self.state, self.params)
         # 返回最后产生的h [batch_size, num_hiddens]
         return h
         
 
 
 class DFF(nn.Module):
-    def __init__(self, num_hiddens, M, beta):
+    def __init__(self, num_hiddens, M, beta, device, feature_size):
         super().__init__()
-        self.LSTM = LSTM(num_hiddens, M)
+        self.LSTM = LSTM(num_hiddens, M, device, feature_size)
         self.beta = beta
 
     def BAP(self, F, A, device):
@@ -181,26 +181,28 @@ class DFF(nn.Module):
         tmp = torch.sum(data-delta, dim=0)
         C = C + torch.unsqueeze((self.beta*tmp/B), dim=0)
         delta = C.repeat(B, 1)
-        loss = MSE(data, delta.detach())
+        loss = MSE(data.data, delta)
         return loss, C
 
     def forward(self, F, A, C, device):
         V = self.BAP(F, A, device=device)
         RCloss, C = self.RCLoss(V, C)
-        h_M = self.LSTM(V, device=device)
+        h_M = self.LSTM(V)
         return h_M, RCloss, C
 
 class CFJLNet(nn.Module):
-    def __init__(self, MF, MC, beta, num_hiddens, genderSize):
+    def __init__(self, MF, MC, beta, num_hiddens, genderSize, device):
         super().__init__()
         self.MC = MC
         self.MF = MF
+        self.FS_F = 256
+        self.FS_C = 512
         self.beta = beta
         self.num_hiddens = num_hiddens
         self.extrad_feature = FeatureExtract(*get_ResNet50(), self.MF, self.MC)
         self.A2 = A2(self.MF, self.MC)
-        self.Fine_DFF = DFF(num_hiddens=self.num_hiddens, M=self.MF, beta=self.beta)
-        self.Coarse_DFF = DFF(num_hiddens=self.num_hiddens, M=self.MC, beta=self.beta)
+        self.Fine_DFF = DFF(num_hiddens=self.num_hiddens, M=self.MF, beta=self.beta, device=device, feature_size=self.FS_F)
+        self.Coarse_DFF = DFF(num_hiddens=self.num_hiddens, M=self.MC, beta=self.beta, device=device, feature_size=self.FS_C)
         self.gender_encoder = nn.Sequential(
             nn.Linear(1, genderSize),
             nn.BatchNorm1d(genderSize),
@@ -255,18 +257,23 @@ if __name__ == '__main__':
     genderSize = 32
     gender = torch.randint(0, 2, (10, 1), dtype=torch.float).cuda()
     net = CFJLNet(MF, MC, beta, num_hiddens, genderSize).cuda()
-    total_params = sum(p.numel() for p in net.parameters())
-    # print(total_params)
-    yF, yC, yEC, Fine_RCloss, Coarse_RCloss, Fine_C, Coarse_C = net(image, gender, Fine_C, Coarse_C)
-    # print(f"yF.shape:{yF.shape}, yC.shape:{yC.shape}, yEC.shape:{yEC.shape}\nFine_RCloss = {Fine_RCloss}, Coarse_RCloss = {Coarse_RCloss}\nFine_C.shape:{Fine_C.shape}, Coarse_C.shape:{Coarse_C.shape}")
-    KL_F = F.kl_div(yF.softmax(dim=-1).log(), label.softmax(dim=-1), reduction='sum')
-    KL_C = F.kl_div(yC.softmax(dim=-1).log(), label.softmax(dim=-1), reduction='sum')
-    KL_EC = F.kl_div(yEC.softmax(dim=-1).log(), label.softmax(dim=-1), reduction='sum')
-    MAE_F = loss_fn(yF, label)
-    MAE_C = loss_fn(yC, label)
-    MAE_EC = loss_fn(yEC, label)
-    loss = ((MAE_F + KL_F) + (MAE_C + KL_C) + (MAE_EC + KL_EC))/3 + Fine_RCloss + Coarse_RCloss
-    print(f"loss is {loss}")
+    print(net)
+    # total_params = sum(p.numel() for p in net.parameters())
+    # # print(total_params)
+    # yF, yC, yEC, Fine_RCloss, Coarse_RCloss, Fine_C, Coarse_C = net(image, gender, Fine_C, Coarse_C, torch.device(f'cuda:{0}'))
+    # print(f"yF.shape:{yF}, \nyC.shape:{yC}, \nyEC.shape:{yEC}\nFine_RCloss = {Fine_RCloss}, Coarse_RCloss = {Coarse_RCloss}\nFine_C.shape:{Fine_C.shape}, Coarse_C.shape:{Coarse_C.shape}")
+
+    # KL_F = F.kl_div(yF.softmax(dim=-1).log(), label.softmax(dim=-1), reduction='sum')
+    # KL_C = F.kl_div(yC.softmax(dim=-1).log(), label.softmax(dim=-1), reduction='sum')
+    # KL_EC = F.kl_div(yEC.softmax(dim=-1).log(), label.softmax(dim=-1), reduction='sum')
+    # MAE_F = loss_fn(yF, label)
+    # MAE_C = loss_fn(yC, label)
+    # MAE_EC = loss_fn(yEC, label)
+    # loss = ((MAE_F + KL_F) + (MAE_C + KL_C) + (MAE_EC + KL_EC))/3 + Fine_RCloss + Coarse_RCloss
+    # loss.backward()
+    # print(f"yF'grad is {yF.grad}")
+    # print(f"loss is {loss}")
+
     # FF, AF, FC, AC, ACk, k = net(image)
     # FF, AF, FC, AC = net(image)
     # print(f"this is FF's shape: {FF.shape}\nthis is AF's shape: {AF.shape}\nthis is FC's shape: {FC.shape}\nthis is AC's shape:{AC.shape}")

@@ -39,7 +39,8 @@ from sklearn.model_selection import train_test_split
 def get_net(MF, MC, beta, num_hiddens, genderSize):
     """获取神经网络，attention_size是指注意力机制Q，K矩阵的长度（default=256）， feature_channels为MMAC输出的通道数（default=2048），output_channels为GA模块输出的注意力图通道数（default=1024）
     isEnsemble是指调用的是整体MMANet（default=TRUE），若值为False，则只调用前半部分的ResNet+MMCA"""
-    MMANet = mymodel.CFJLNet(MF, MC, beta, num_hiddens, genderSize)
+    device = try_gpu()
+    MMANet = mymodel.CFJLNet(MF, MC, beta, num_hiddens, genderSize, device=device)
     return MMANet
 
 def sample_normalize(image, **kwargs):
@@ -225,13 +226,11 @@ def map_fn(net, train_dataset, valid_dataset, num_epochs, lr, wd, lr_period, lr_
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=6,
         drop_last=True)
 
     val_loader = torch.utils.data.DataLoader(
         valid_dataset,
         batch_size=batch_size,
-        num_workers=6,
         shuffle=False)
 
     # 增加多卡训练
@@ -383,7 +382,8 @@ if __name__ == '__main__':
     # print(sum(p.numel() for p in MMANet.parameters()))
     # params = list(MMANet.MLP.parameters())
     # print(params)
-    bone_dir = "F:\GitCode\BoneAgeAss-main\data/archive/testDataset"
-    csv_name = "boneage-traning-dataset.csv"
-    train_df, valid_df = split_data(bone_dir, csv_name, 10, 0.1, 10)
-    print("boneage_mean = ", boneage_mean, "boneage_div", boneage_div)
+    # bone_dir = "F:\GitCode\BoneAgeAss-main\data/archive/testDataset"
+    # csv_name = "boneage-traning-dataset.csv"
+    # train_df, valid_df = split_data(bone_dir, csv_name, 10, 0.1, 10)
+    # print("boneage_mean = ", boneage_mean, "boneage_div", boneage_div)
+    devices = try_gpu()

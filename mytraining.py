@@ -24,7 +24,7 @@ if __name__ == '__main__':
     gender = torch.randint(0, 2, (10, 1), dtype=torch.float)
     net = myKit.get_net(MF=MF, MC=MC, beta=beta, num_hiddens=num_hiddens, genderSize=genderSize)
     lr = 3e-5
-    batch_size = 32
+    batch_size = 4
     num_epochs = 40
     weight_decay = 0
     lr_period = 4
@@ -37,3 +37,5 @@ if __name__ == '__main__':
     torch.set_default_tensor_type('torch.FloatTensor')
     # myKit.map_fn(net=net, train_dataset=train_set, valid_dataset=val_set, num_epochs=num_epochs, lr=lr, wd=weight_decay, lr_period=lr_period, lr_decay=lr_decay,loss_fn=loss_fn, batch_size=batch_size, model_path="model.pth", record_path="RECORD.csv")
     myKit.map_fn(net, train_set, val_set, num_epochs, lr, weight_decay, lr_period, lr_decay, loss_fn, cls_weight, Fine_C, Coarse_C, batch_size=batch_size, model_path="./model.pth", record_path="./RECORD.csv")
+
+        
