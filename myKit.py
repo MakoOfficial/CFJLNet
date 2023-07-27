@@ -141,14 +141,14 @@ def split_data(data_dir, csv_name, category_num, split_ratio, aug_num):
     random_state=2023,
     stratify=age_df['boneage_category']
     )
-    print('train', raw_train_df.shape[0], 'validation', valid_df.shape[0])
-    # train_df = raw_train_df.groupby(['boneage_category', 'male']).apply(lambda x: x.sample(aug_num, replace=True)).reset_index(drop=True)
+    # print('train', raw_train_df.shape[0], 'validation', valid_df.shape[0])
+    train_df = raw_train_df.groupby(['boneage_category', 'male']).apply(lambda x: x.sample(aug_num, replace=True)).reset_index(drop=True)
     # 注意的是，这里对df进行多列分组，因为boneage_category为10类， male为2类，所以总共有20类，而apply对每一类进行随机采样，并且有放回的抽取，所以会生成1w的数据
     # train_df = raw_train_df.groupby(['boneage_category']).apply(lambda x: x)
-    # print('New Data Size:', train_df.shape[0], 'Old Size:', raw_train_df.shape[0])
-    raw_train_df.to_csv("train.csv")
+    print('New Data Size:', train_df.shape[0], 'validation', valid_df.shape[0])
+    train_df.to_csv("train.csv")
     valid_df.to_csv("valid.csv")
-    return raw_train_df, valid_df
+    return train_df, valid_df
     # return train_df, valid_df, boneage_mean, boneage_div
 
 # create 'dataset's subclass,we can read a picture when we need in training trough this way
@@ -231,6 +231,7 @@ def map_fn(net, train_dataset, valid_dataset, num_epochs, lr, wd, lr_period, lr_
     val_loader = torch.utils.data.DataLoader(
         valid_dataset,
         batch_size=batch_size,
+        drop_last=True,
         shuffle=False)
 
     # 增加多卡训练

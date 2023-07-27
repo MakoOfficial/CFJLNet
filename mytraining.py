@@ -24,7 +24,7 @@ if __name__ == '__main__':
     gender = torch.randint(0, 2, (10, 1), dtype=torch.float)
     net = myKit.get_net(MF=MF, MC=MC, beta=beta, num_hiddens=num_hiddens, genderSize=genderSize)
     lr = 3e-5
-    batch_size = 4
+    batch_size = 32
     num_epochs = 40
     weight_decay = 0
     lr_period = 4
