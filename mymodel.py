@@ -145,6 +145,7 @@ class DFF(nn.Module):
             fk = torch.squeeze(fk) # BxC
             # fk = fk.view(1, fk.shape[0], fk.shape[1])
             V = torch.cat((V, fk), dim=1)
+        # print(V[:, 1:])
         return V[:, 1:] # BxMC
 
     def RCLoss(self, data, C):
@@ -165,9 +166,15 @@ class DFF(nn.Module):
         RCloss, C = self.RCLoss(V, C)
         h_M = self.LSTM(V, device)
         return h_M, RCloss, C
+        # A = torch.mean(A, dim=1, keepdim=True)
+        # feature = F*A
+        # feature = nn.functional.adaptive_avg_pool2d(feature, 1)
+        # feature = feature.squeeze()
+        # # return h_M, C
+        # return feature
 
 class CFJLNet(nn.Module):
-    def __init__(self, MF, MC, beta, num_hiddens, genderSize, device):
+    def __init__(self, MF, MC, beta, num_hiddens, genderSize):
         super().__init__()
         self.MC = MC
         self.MF = MF
@@ -175,7 +182,10 @@ class CFJLNet(nn.Module):
         self.FS_C = 512
         self.beta = beta
         self.num_hiddens = num_hiddens
+        # self.backbone ,self.out_channels = get_ResNet50()
         self.extrad_feature = FeatureExtract(*get_ResNet50(), self.MF, self.MC)
+        # self.featureExtrate = nn.Sequential(*self.backbone[0:8])
+
         self.A2 = A2(self.MF, self.MC)
         self.Fine_DFF = DFF(num_hiddens=self.num_hiddens, M=self.MF, beta=self.beta, feature_size=self.FS_F)
         self.Coarse_DFF = DFF(num_hiddens=self.num_hiddens, M=self.MC, beta=self.beta, feature_size=self.FS_C)
@@ -185,25 +195,45 @@ class CFJLNet(nn.Module):
             nn.ReLU()
         )
         self.Fine_MLP = nn.Sequential(
-            nn.Linear(self.num_hiddens + genderSize, 128),
+            # nn.Linear(256 + genderSize, 128),
+            nn.Linear(128 + genderSize, 128),
             nn.BatchNorm1d(128),
             nn.ReLU(),
             nn.Linear(128, 1)
         )
         self.Coarse_MLP = nn.Sequential(
-            nn.Linear(self.num_hiddens + genderSize, 128),
+            nn.Linear(128 + genderSize, 128),
             nn.BatchNorm1d(128),
             nn.ReLU(),
             nn.Linear(128, 1)
         )
+        # self.MLP = nn.Sequential(
+        #     nn.Linear(self.out_channels + genderSize, 1024),
+        #     nn.BatchNorm1d(1024),
+        #     nn.ReLU(),
+        #     nn.Linear(1024, 512),
+        #     nn.BatchNorm1d(512),
+        #     nn.ReLU(),
+        #     nn.Linear(512, 1)
+        # )
 
     def forward(self, image, gender, Fine_C, Coarse_C, device):
         F_data, C_data, E_data = self.extrad_feature(image)
+        gF, _ = F_data
+        gC, _ = C_data
         AF_plus = self.A2(F_data[1], C_data[1])
+
         gF, Fine_RCloss, Fine_C = self.Fine_DFF(F_data[0], AF_plus, Fine_C, device=device)
         gC, Coarse_RCloss, Coarse_C = self.Coarse_DFF(*C_data, Coarse_C, device=device)
+        # gF, Fine_C = self.Fine_DFF(F_data[0], AF_plus, Fine_C, device=device)
+        # gC, Coarse_C = self.Coarse_DFF(*C_data, Coarse_C, device=device)
         gEC, _, _ = self.Coarse_DFF(*E_data, torch.zeros_like(Coarse_C, dtype=torch.float, device=device), device=device)
+        # gEC, _ = self.Coarse_DFF(*E_data, torch.zeros_like(Coarse_C, dtype=torch.float, device=device), device=device)
+        # gF = self.Fine_DFF(F_data[0], AF_plus, Fine_C, device=device)
+        # gC = self.Coarse_DFF(*C_data, Coarse_C, device=device)
+        # gEC = self.Coarse_DFF(*E_data, torch.zeros_like(Coarse_C, dtype=torch.float, device=device), device=device)
         gender_feature = self.gender_encoder(gender)
+
         gF = torch.cat([gF, gender_feature], dim=1)
         gC = torch.cat([gC, gender_feature], dim=1)
         gEC = torch.cat([gEC, gender_feature], dim=1)
@@ -212,7 +242,18 @@ class CFJLNet(nn.Module):
         yEC = self.Coarse_MLP(gEC)
 
         return yF, yC, yEC, Fine_RCloss, Coarse_RCloss, Fine_C, Coarse_C
+        # return yF, yC, yEC, Fine_C, Coarse_C
+        # return yF, yC
+    # def forward(self, image, gender):
+    #     feature = self.featureExtrate(image)
+    #     feature = F.adaptive_avg_pool2d(feature, 1)
+    #     feature = torch.squeeze(feature)
+    #     gender_feature = self.gender_encoder(gender)
+    #     feature = feature.view(-1, self.out_channels)
+    #     g = torch.cat([feature, gender_feature], dim=1)
+    #     x = self.MLP(g)
 
+    #     return x
 
 
 
@@ -232,11 +273,12 @@ if __name__ == '__main__':
     num_hiddens = 128
     genderSize = 32
     gender = torch.randint(0, 2, (10, 1), dtype=torch.float).cuda()
-    net = CFJLNet(MF, MC, beta, num_hiddens, genderSize, device=torch.device(f'cuda:0')).cuda()
-    print(net)
+    net = CFJLNet(MF, MC, beta, num_hiddens, genderSize).cuda()
+    # print(net)
     # total_params = sum(p.numel() for p in net.parameters())
     # print(total_params)
-    # yF, yC, yEC, Fine_RCloss, Coarse_RCloss, Fine_C, Coarse_C = net(image, gender, Fine_C, Coarse_C, torch.device(f'cuda:{0}'))
+    yF, yC, yEC, Fine_RCloss, Coarse_RCloss, Fine_C, Coarse_C = net(image, gender, Fine_C, Coarse_C, torch.device(f'cuda:{0}'))
+    # yF, yC, yEC, Fine_C, Coarse_C = net(image, gender, Fine_C, Coarse_C, torch.device(f'cuda:{0}'))
     # print(f"yF.shape:{yF}, \nyC.shape:{yC}, \nyEC.shape:{yEC}\nFine_RCloss = {Fine_RCloss}, Coarse_RCloss = {Coarse_RCloss}\nFine_C.shape:{Fine_C.shape}, Coarse_C.shape:{Coarse_C.shape}")
 
     # KL_F = F.kl_div(yF.softmax(dim=-1).log(), label.softmax(dim=-1), reduction='sum')
