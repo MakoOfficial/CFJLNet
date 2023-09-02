@@ -23,7 +23,7 @@ from d2l import torch as d2l
 import csv
 import time
 from sklearn.model_selection import train_test_split
-
+import random
 """本文档主要是解决训练过程中的一些所用到的函数的集合
 函数列表：
 获取神经网络：get_net
@@ -36,12 +36,23 @@ from sklearn.model_selection import train_test_split
 # boneage_mean = train_df['boneage'].mean()
 # boneage_div = train_df['boneage'].std()
 
-def get_net(MF, MC, beta, num_hiddens, genderSize):
+def get_net(MF, MC, beta, num_hiddens, genderSize=32):
     """获取神经网络，attention_size是指注意力机制Q，K矩阵的长度（default=256）， feature_channels为MMAC输出的通道数（default=2048），output_channels为GA模块输出的注意力图通道数（default=1024）
     isEnsemble是指调用的是整体MMANet（default=TRUE），若值为False，则只调用前半部分的ResNet+MMCA"""
-    device = try_gpu()
-    MMANet = mymodel.CFJLNet(MF, MC, beta, num_hiddens, genderSize, device=device)
+    MMANet = mymodel.CFJLNet(MF, MC, beta, num_hiddens, genderSize)
     return MMANet
+
+
+def seed_everything(seed=1234):
+    random.seed(seed)
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+# def get_net():
+#     MMANet = mymodel.CJ(32, *myresnet.get_ResNet())
+#     # MMANet = mymodel.myres(32, *mymodel.get_ResNet())
+#     return MMANet
+
 
 def sample_normalize(image, **kwargs):
     """标准化每个通道"""
@@ -111,18 +122,6 @@ def split_data(data_dir, csv_name, category_num, split_ratio, aug_num):
     print(age_df['exists'].sum(), 'images found of', age_df.shape[0], 'total')
     age_df['male'] = age_df['male'].astype('float32')
     age_df['gender'] = age_df['male'].map(lambda x:'male' if x else 'female')
-
-    # age_df['Bin'] = pd.cut(age_df['boneage'], category_num, labels=False)
-    # lower_bound = age_df['Bin'].min() + 5
-    # upper_bound = age_df['Bin'].max() - 5
-    # selected_df = age_df[age_df['Bin'].between(lower_bound, upper_bound)]
-    # global boneage_mean
-    # boneage_mean = selected_df['boneage'].mean()
-    # global boneage_div
-    # boneage_div = selected_df['boneage'].std()
-    # selected_df['zscore'] = selected_df['boneage'].map(lambda x: (x-boneage_mean)/boneage_div)
-    # selected_df.dropna(inplace = True)
-    # selected_df['boneage_category'] = pd.cut(age_df['boneage'], category_num-10)
 
     global boneage_mean
     boneage_mean = age_df['boneage'].mean()
@@ -201,14 +200,6 @@ def try_gpu(i=0):
         return torch.device(f'cuda:{i}')
     return torch.device('cpu')
 
-def accuracy(y_hat, y):
-    """得出精确数量"""
-    if len(y_hat.shape) > 1 and y_hat.shape[1] > 1:
-        y_hat = d2l.argmax(y_hat, axis=1)
-    cmp = d2l.astype(y_hat, y.dtype) == y
-    return float(d2l.reduce_sum(d2l.astype(cmp, y.dtype)))
-
-
 
 def map_fn(net, train_dataset, valid_dataset, num_epochs, lr, wd, lr_period, lr_decay, loss_fn, cls_weight, Fine_C, Coarse_C, batch_size=32, model_path="./model.pth", record_path="./RECORD.csv"):
     """将训练函数和验证函数杂糅在一起的垃圾函数"""
@@ -219,6 +210,12 @@ def map_fn(net, train_dataset, valid_dataset, num_epochs, lr, wd, lr_period, lr_
         for row in record:
             writer.writerow(row)
     devices = d2l.try_all_gpus()
+    # 增加多卡训练
+    net = nn.DataParallel(net, device_ids=devices)
+
+    ## Network, optimizer, and loss function creation
+    net = net.to(devices[0])
+
     # 数据读取
     # Creates dataloaders, which load data in batches
     # Note: test loader is not shuffled or sampled
@@ -226,27 +223,26 @@ def map_fn(net, train_dataset, valid_dataset, num_epochs, lr, wd, lr_period, lr_
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
+        num_workers=6,
         drop_last=True)
 
     val_loader = torch.utils.data.DataLoader(
         valid_dataset,
         batch_size=batch_size,
         drop_last=True,
+        num_workers=6,
         shuffle=False)
-
-    # 增加多卡训练
-    net = nn.DataParallel(net, device_ids=devices)
-
-    ## Network, optimizer, and loss function creation
-    net = net.to(devices[0])
+    
 
     # loss_fn = nn.MSELoss(reduction = 'sum')
     # loss_fn = nn.L1Loss(reduction='sum')
+    lr = lr
+
 
     optimizer = torch.optim.Adam(net.parameters(), lr=lr, weight_decay=wd)
     # 每过10轮，学习率降低一半
-    # scheduler = StepLR(optimizer, step_size=lr_period, gamma=lr_decay)
-    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=lr_decay, patience=lr_period, verbose=True, threshold=0.0001, threshold_mode='rel', cooldown=0, min_lr=0, eps=1e-08)
+    scheduler = StepLR(optimizer, step_size=lr_period, gamma=lr_decay)
+    # scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=lr_decay, patience=lr_period, verbose=True, threshold=0.0001, threshold_mode='rel', cooldown=0, min_lr=0, eps=1e-08)
 
     seed=101
     torch.manual_seed(seed)  
@@ -261,6 +257,8 @@ def map_fn(net, train_dataset, valid_dataset, num_epochs, lr, wd, lr_period, lr_
         training_loss = torch.tensor([0], dtype=torch.float32)
         global total_size
         total_size = torch.tensor([0], dtype=torch.float32)
+
+
         start_time = time.time()
         # 在不同的设备上运行该模型
         #   enumerate()，为括号中序列构建索引
@@ -278,14 +276,24 @@ def map_fn(net, train_dataset, valid_dataset, num_epochs, lr, wd, lr_period, lr_
             # _, _, _, _, _, _, _, y_pred = net(image, gender)
             # y_pred = net(image, gender)
             yF, yC, yEC, Fine_RCloss, Coarse_RCloss, Fine_C, Coarse_C = net(image, gender, Fine_C, Coarse_C, device=devices[0])
+            # yF, yC, yEC, Fine_C, Coarse_C = net(image, gender, Fine_C, Coarse_C, device=devices[0])
+            # yF, yC = net(image, gender, Fine_C, Coarse_C, device=devices[0])
+
+            # 检测backbone是否有效
+            yF = yF.squeeze()
+            yC = yC.squeeze()
+            yEC = yEC.squeeze()
+            
             KL_F = F.kl_div(yF.softmax(dim=-1).log(), label.softmax(dim=-1), reduction='sum')
             KL_C = F.kl_div(yC.softmax(dim=-1).log(), label.softmax(dim=-1), reduction='sum')
             KL_EC = F.kl_div(yEC.softmax(dim=-1).log(), label.softmax(dim=-1), reduction='sum')
+            # KL = F.kl_div(y.softmax(dim=-1).log(), label.softmax(dim=-1), reduction='sum')
+
             MAE_F = loss_fn(yF, label)
             MAE_C = loss_fn(yC, label)
             MAE_EC = loss_fn(yEC, label)
+
             loss = ((MAE_F + KL_F) + (MAE_C + KL_C) + (MAE_EC + KL_EC))/cls_weight + Fine_RCloss + Coarse_RCloss
-            # loss = ((MAE_F + KL_F) + (MAE_C + KL_C) + (MAE_EC + KL_EC))/cls_weight
             # y_pred = y_pred.squeeze()
 
 
@@ -318,7 +326,7 @@ def map_fn(net, train_dataset, valid_dataset, num_epochs, lr, wd, lr_period, lr_
         this_record.append([epoch, round(train_loss.item(), 2), round(val_mae.item(), 2), optimizer.param_groups[0]["lr"]])
         print(
             f'training loss is {round(train_loss.item(), 2)}, val loss is {round(val_mae.item(), 2)}, time : {round((time.time() - start_time), 2)}, lr:{optimizer.param_groups[0]["lr"]}')
-        scheduler.step(train_loss)
+        scheduler.step()
         with open(record_path, 'a+', newline='') as csvfile:
             writer = csv.writer(csvfile)
             for row in this_record:
@@ -348,12 +356,16 @@ def valid_fn(*, net, val_loader, Fine_C, Coarse_C, devices):
             # y_pred = net(image, gender)
             
             yF, yC, _, _, _, _, _ = net(image, gender, torch.zeros_like(Fine_C).to(devices[0]), torch.zeros_like(Coarse_C).to(devices[0]), device=devices[0])
+            # yF, yC, _, _, _ = net(image, gender, torch.zeros_like(Fine_C).to(devices[0]), torch.zeros_like(Coarse_C).to(devices[0]), device=devices[0])
+            # yF, yC = net(image, gender, torch.zeros_like(Fine_C).to(devices[0]), torch.zeros_like(Coarse_C).to(devices[0]), device=devices[0])
+            # y_pred = net(image, gender)
             y_pred = (yF + yC)/2
             y_pred = y_pred.cpu()
             label = label.cpu()
+            y_pred = y_pred.squeeze()
             y_pred = y_pred * boneage_div + boneage_mean
             # y_pred_loss = y_pred.argmax(axis=1)
-            y_pred = y_pred.squeeze()
+            
 
             batch_loss = loss_fn(y_pred, label).item()
             mae_loss += batch_loss
