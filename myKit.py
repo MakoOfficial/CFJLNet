@@ -275,25 +275,27 @@ def map_fn(net, train_dataset, valid_dataset, num_epochs, lr, wd, lr_period, lr_
             # forward
             # _, _, _, _, _, _, _, y_pred = net(image, gender)
             # y_pred = net(image, gender)
-            yF, yC, yEC, Fine_RCloss, Coarse_RCloss, Fine_C, Coarse_C = net(image, gender, Fine_C, Coarse_C, device=devices[0])
+            # yF, yC, yEC, Fine_RCloss, Coarse_RCloss, Fine_C, Coarse_C = net(image, gender, Fine_C, Coarse_C, device=devices[0])
+            yF, yC, Fine_RCloss, Coarse_RCloss, Fine_C, Coarse_C = net(image, gender, Fine_C, Coarse_C, device=devices[0])
             # yF, yC, yEC, Fine_C, Coarse_C = net(image, gender, Fine_C, Coarse_C, device=devices[0])
             # yF, yC = net(image, gender, Fine_C, Coarse_C, device=devices[0])
 
             # 检测backbone是否有效
             yF = yF.squeeze()
             yC = yC.squeeze()
-            yEC = yEC.squeeze()
+            # yEC = yEC.squeeze()
             
             KL_F = F.kl_div(yF.softmax(dim=-1).log(), label.softmax(dim=-1), reduction='sum')
             KL_C = F.kl_div(yC.softmax(dim=-1).log(), label.softmax(dim=-1), reduction='sum')
-            KL_EC = F.kl_div(yEC.softmax(dim=-1).log(), label.softmax(dim=-1), reduction='sum')
+            # KL_EC = F.kl_div(yEC.softmax(dim=-1).log(), label.softmax(dim=-1), reduction='sum')
             # KL = F.kl_div(y.softmax(dim=-1).log(), label.softmax(dim=-1), reduction='sum')
 
             MAE_F = loss_fn(yF, label)
             MAE_C = loss_fn(yC, label)
-            MAE_EC = loss_fn(yEC, label)
+            # MAE_EC = loss_fn(yEC, label)
 
-            loss = ((MAE_F + KL_F) + (MAE_C + KL_C) + (MAE_EC + KL_EC))/cls_weight + Fine_RCloss + Coarse_RCloss
+            # loss = ((MAE_F + KL_F) + (MAE_C + KL_C) + (MAE_EC + KL_EC))/cls_weight + Fine_RCloss + Coarse_RCloss
+            loss = ((MAE_F + KL_F) + (MAE_C + KL_C))/cls_weight + Fine_RCloss + Coarse_RCloss
             # y_pred = y_pred.squeeze()
 
 
