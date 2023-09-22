@@ -22,12 +22,12 @@ class lightWeight(nn.Module):
         self.BN2 = backbone[3]
         self.conv3 = backbone[4]
         self.BN3 = backbone[5]
-        self.ReLU = backbone[6]
+        self.ReLU = nn.LeakyReLU()
 
     def forward(self, x, M):
         input = x
         feature_map = self.BN1(self.conv1(x))
-        x = feature_map
+        x = self.ReLU(feature_map)
         x = self.BN2(self.conv2(x))
         attention_map = self.ReLU(x)
         attention_map = attention_map[:, :M, :, :]
@@ -57,24 +57,26 @@ class FeatureExtract(nn.Module):
         x = self.MiddleLayer(self.LowLayer(image))
         FF, AF, x = self.lightWeight1(x, self.MF)
         FC, AC, x = self.lightWeight2(self.HighLayer(x), self.MC)
+        
+        # cancel the erase model
+        # # 生成掩码
+        # k = np.random.randint(1, self.MC)
+        # ACk = AC[:, k, :, :].detach()
+        # # ACk = F.interpolate(ACk.unsqueeze(dim=1), scale_factor=32, mode='bilinear')
+        # ACk = self.upsample(ACk.unsqueeze(dim=1))
+        # sita = np.random.uniform(0.2, 0.5)
+        # zero = torch.zeros_like(ACk)
+        # one = torch.ones_like(ACk)
+        # mask = torch.where(ACk>sita, zero, one)
+        # erase_image = image*mask
+        # erase_image = erase_image
 
-        # 生成掩码
-        k = np.random.randint(1, self.MC)
-        ACk = AC[:, k, :, :].detach()
-        # ACk = F.interpolate(ACk.unsqueeze(dim=1), scale_factor=32, mode='bilinear')
-        ACk = self.upsample(ACk.unsqueeze(dim=1))
-        sita = np.random.uniform(0.2, 0.5)
-        zero = torch.zeros_like(ACk)
-        one = torch.ones_like(ACk)
-        mask = torch.where(ACk>sita, zero, one)
-        erase_image = image*mask
-        erase_image = erase_image
+        # Ex = self.MiddleLayer(self.LowLayer(erase_image))
+        # _, _, Ex = self.lightWeight1(Ex, self.MF)
+        # FE, AE, _ = self.lightWeight2(self.HighLayer(Ex), self.MC)
 
-        Ex = self.MiddleLayer(self.LowLayer(erase_image))
-        _, _, Ex = self.lightWeight1(Ex, self.MF)
-        FE, AE, _ = self.lightWeight2(self.HighLayer(Ex), self.MC)
-
-        return (FF, AF), (FC, AC), (FE, AE)
+        # return (FF, AF), (FC, AC), (FE, AE)
+        return (FF, AF), (FC, AC)
 
 class A2(nn.Module):
     def __init__(self, MF, MC):
@@ -83,7 +85,8 @@ class A2(nn.Module):
         self.MC = MC
         self.MF = MF
         self.upsample_layer = nn.Upsample(scale_factor=2, mode='bilinear')
-        self.sigmoid = nn.Sigmoid()
+        # self.sigmoid = nn.Sigmoid()
+        self.leakyReLU = nn.LeakyReLU()
 
     def forward(self, AF, AC):
         AC = self.upsample_layer(AC)
@@ -195,14 +198,14 @@ class CFJLNet(nn.Module):
             nn.ReLU()
         )
         self.Fine_MLP = nn.Sequential(
-            # nn.Linear(256 + genderSize, 128),
-            nn.Linear(128 + genderSize, 128),
+            nn.Linear(256 + genderSize, 128),
+            # nn.Linear(128 + genderSize, 1)
             nn.BatchNorm1d(128),
             nn.ReLU(),
             nn.Linear(128, 1)
         )
         self.Coarse_MLP = nn.Sequential(
-            nn.Linear(128 + genderSize, 128),
+            nn.Linear(256 + genderSize, 128),
             nn.BatchNorm1d(128),
             nn.ReLU(),
             nn.Linear(128, 1)
@@ -218,16 +221,17 @@ class CFJLNet(nn.Module):
         # )
 
     def forward(self, image, gender, Fine_C, Coarse_C, device):
-        F_data, C_data, E_data = self.extrad_feature(image)
-        gF, _ = F_data
-        gC, _ = C_data
+        # F_data, C_data, E_data = self.extrad_feature(image)
+        F_data, C_data = self.extrad_feature(image)
+        # gF, _ = F_data
+        # gC, _ = C_data
         AF_plus = self.A2(F_data[1], C_data[1])
 
         gF, Fine_RCloss, Fine_C = self.Fine_DFF(F_data[0], AF_plus, Fine_C, device=device)
         gC, Coarse_RCloss, Coarse_C = self.Coarse_DFF(*C_data, Coarse_C, device=device)
         # gF, Fine_C = self.Fine_DFF(F_data[0], AF_plus, Fine_C, device=device)
         # gC, Coarse_C = self.Coarse_DFF(*C_data, Coarse_C, device=device)
-        gEC, _, _ = self.Coarse_DFF(*E_data, torch.zeros_like(Coarse_C, dtype=torch.float, device=device), device=device)
+        # gEC, _, _ = self.Coarse_DFF(*E_data, torch.zeros_like(Coarse_C, dtype=torch.float, device=device), device=device)
         # gEC, _ = self.Coarse_DFF(*E_data, torch.zeros_like(Coarse_C, dtype=torch.float, device=device), device=device)
         # gF = self.Fine_DFF(F_data[0], AF_plus, Fine_C, device=device)
         # gC = self.Coarse_DFF(*C_data, Coarse_C, device=device)
@@ -236,14 +240,14 @@ class CFJLNet(nn.Module):
 
         gF = torch.cat([gF, gender_feature], dim=1)
         gC = torch.cat([gC, gender_feature], dim=1)
-        gEC = torch.cat([gEC, gender_feature], dim=1)
+        # gEC = torch.cat([gEC, gender_feature], dim=1)
         yF = self.Fine_MLP(gF)
         yC = self.Coarse_MLP(gC)
-        yEC = self.Coarse_MLP(gEC)
+        # yEC = self.Coarse_MLP(gEC)
 
-        return yF, yC, yEC, Fine_RCloss, Coarse_RCloss, Fine_C, Coarse_C
-        # return yF, yC, yEC, Fine_C, Coarse_C
-        # return yF, yC
+        # return yF, yC, yEC, Fine_RCloss, Coarse_RCloss, Fine_C, Coarse_C
+        return yF, yC, Fine_RCloss, Coarse_RCloss, Fine_C, Coarse_C
+    
     # def forward(self, image, gender):
     #     feature = self.featureExtrate(image)
     #     feature = F.adaptive_avg_pool2d(feature, 1)
