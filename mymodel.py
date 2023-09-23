@@ -26,11 +26,9 @@ class lightWeight(nn.Module):
 
     def forward(self, x, M):
         input = x
-        feature_map = self.BN1(self.conv1(x))
-        x = self.ReLU(feature_map)
-        x = self.BN2(self.conv2(x))
-        attention_map = self.ReLU(x)
-        attention_map = attention_map[:, :M, :, :]
+        feature_map = self.ReLU(self.BN1(self.conv1(x)))
+        x = self.ReLU(self.BN2(self.conv2(feature_map)))
+        attention_map = x[:, :M, :, :]
         x = self.BN3(self.conv3(x))
         x = self.ReLU(input + x)
         return feature_map, attention_map, x
@@ -85,8 +83,8 @@ class A2(nn.Module):
         self.MC = MC
         self.MF = MF
         self.upsample_layer = nn.Upsample(scale_factor=2, mode='bilinear')
-        # self.sigmoid = nn.Sigmoid()
-        self.leakyReLU = nn.LeakyReLU()
+        self.sigmoid = nn.Sigmoid()
+        # self.leakyReLU = nn.LeakyReLU()
 
     def forward(self, AF, AC):
         AC = self.upsample_layer(AC)
