@@ -357,7 +357,7 @@ def valid_fn(*, net, val_loader, Fine_C, Coarse_C, devices):
             #   net内求出的是normalize后的数据，这里应该是是其还原，而不是直接net（）
             # y_pred = net(image, gender)
             
-            yF, yC, _, _, _, _, _ = net(image, gender, torch.zeros_like(Fine_C).to(devices[0]), torch.zeros_like(Coarse_C).to(devices[0]), device=devices[0])
+            yF, yC, _, _, _, _ = net(image, gender, torch.zeros_like(Fine_C).to(devices[0]), torch.zeros_like(Coarse_C).to(devices[0]), device=devices[0])
             # yF, yC, _, _, _ = net(image, gender, torch.zeros_like(Fine_C).to(devices[0]), torch.zeros_like(Coarse_C).to(devices[0]), device=devices[0])
             # yF, yC = net(image, gender, torch.zeros_like(Fine_C).to(devices[0]), torch.zeros_like(Coarse_C).to(devices[0]), device=devices[0])
             # y_pred = net(image, gender)
